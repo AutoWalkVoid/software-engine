@@ -1,0 +1,9 @@
+# 运行时数据（SQLite 数据库、私有图片）
+var/
+
+# 虚拟环境
+.venv/
+
+# Python 缓存
+__pycache__/
+*.pyc

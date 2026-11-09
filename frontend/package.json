@@ -1,0 +1,20 @@
+{
+  "name": "campus-lostfound-b-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "description": "校园失物招领系统 B 子系统（信息发布与浏览）v0 前端，仅用于验证 B 模块能融入小组",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "vue": "^3.5.13",
+    "vue-router": "^4.5.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.1",
+    "vite": "^6.0.7"
+  }
+}
