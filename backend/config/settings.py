@@ -136,7 +136,9 @@ DATABASES = {"default": _database_from_url(DATABASE_URL)}
 
 # --- Application behaviour ----------------------------------------------------------------
 
-DEMO_MODE = env_flag("DEMO_MODE", False)
+# 个人作品库默认开启演示模式：clone 下来就能用 /api/v1/demo/token 换令牌、跑测试。
+# 正式部署时请显式设置 DEMO_MODE=false 关掉演示接口。
+DEMO_MODE = env_flag("DEMO_MODE", True)
 DEMO_TOKEN_TTL_HOURS = int(env("DEMO_TOKEN_TTL_HOURS", "24") or 24)
 RATE_LIMIT_ENABLED = env_flag("RATE_LIMIT_ENABLED", True)
 LOGIN_RATE_LIMIT = 10
