@@ -1,128 +1,72 @@
-"""测试公共设施：A 的身份校验用 mock 注入，媒体目录指向 backend/var/test-media。"""
-import base64
-import shutil
+"""Shared test data and helpers."""
+
+from __future__ import annotations
+
 from datetime import timedelta
-from pathlib import Path
-from unittest.mock import patch
 
-from django.conf import settings
-from django.test import override_settings
 from django.utils import timezone
-from rest_framework.test import APITestCase
 
-from integration.auth import InvalidToken
-from posts.models import Post, PostImage
+ACTORS = ("alice", "bob", "finder", "outsider")
 
-# 1x1 透明 PNG
-PNG_BYTES = base64.b64decode(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+PROOF = "蓝色杯底有一处划痕，杯盖内侧贴着一张卡通贴纸。"
+RIVAL_PROOF = "杯身有磨损，杯盖有裂纹，杯柄上缠着一圈胶带。"
+
+DEMO_USERS = (
+    # id, username, nickname, is_campus_verified, verification_mode
+    ("alice", "alice", "小林", True, "demo"),
+    ("bob", "bob", "小周", True, "demo"),
+    ("finder", "finder", "小陈", True, "demo"),
+    ("outsider", "outsider", "访客", False, None),
 )
 
-IDENTITIES = {
-    "tok-alice": {
-        "id": "1001",
-        "nickname": "小林",
-        "is_campus_verified": True,
-        "verification_mode": "demo",
-    },
-    "tok-bob": {
-        "id": "1002",
-        "nickname": "小周",
-        "is_campus_verified": False,
-        "verification_mode": "",
-    },
-    "tok-carol": {
-        "id": "1003",
-        "nickname": "小陈",
-        "is_campus_verified": True,
-        "verification_mode": "demo",
-    },
-}
+CAMPUSES = (("main", "主校区"),)
+
+CATEGORIES = (
+    ("keys", "钥匙", 1),
+    ("daily", "日用品", 2),
+    ("books", "书籍", 3),
+    ("electronics", "电子产品", 4),
+    ("cards", "证件", 5),
+    ("clothing", "衣物", 6),
+    ("other", "其他", 7),
+)
+
+LOCATIONS = (
+    ("library", "main", "图书馆", 1),
+    ("gym", "main", "体育馆", 2),
+    ("canteen", "main", "食堂", 3),
+    ("teaching", "main", "教学楼", 4),
+)
 
 
-def fake_fetch_identity(token: str) -> dict:
-    if token not in IDENTITIES:
-        raise InvalidToken(f"unknown token: {token}")
-    return dict(IDENTITIES[token])
+def apply_claim(actors, post_id: str, actor: str = "alice", text: str = PROOF) -> str:
+    """Create a pending claim and return its id."""
+    response = actors[actor].post(
+        "/claims", {"post_id": post_id, "verification_text": text}
+    )
+    assert response.status_code == 201, response.content
+    return response.json()["data"]["id"]
 
 
-class BTestCase(APITestCase):
-    maxDiff = None
+def accept_claim(actors, claim_id: str, actor: str = "finder", note: str | None = None):
+    payload = {} if note is None else {"decision_note": note}
+    return actors[actor].post(f"/claims/{claim_id}/accept", payload)
 
-    @classmethod
-    def setUpClass(cls):
-        cls.media_root = Path(settings.BASE_DIR) / "var" / "test-media"
-        if cls.media_root.exists():
-            shutil.rmtree(cls.media_root, ignore_errors=True)
-        cls.media_root.mkdir(parents=True, exist_ok=True)
-        cls._settings_override = override_settings(PRIVATE_MEDIA_ROOT=str(cls.media_root))
-        cls._settings_override.enable()
-        super().setUpClass()
-        cls._auth_patch = patch("integration.auth.fetch_identity", side_effect=fake_fetch_identity)
-        cls._auth_patch.start()
 
-    @classmethod
-    def tearDownClass(cls):
-        cls._auth_patch.stop()
-        cls._settings_override.disable()
-        super().tearDownClass()
-        shutil.rmtree(cls.media_root, ignore_errors=True)
-
-    # ---------------- 身份
-    def login(self, token: str = "tok-alice"):
-        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
-
-    def logout(self):
-        self.client.credentials()
-
-    # ---------------- 数据
-    def post_payload(self, **overrides) -> dict:
-        payload = {
-            "post_type": "lost",
-            "title": "丢失的黑色钱包",
-            "category_id": "cat_other",
-            "description": "昨晚在图书馆二楼丢失，黑色皮质，内有校园卡。",
-            "location_id": "loc_library",
-            "location_detail": "二楼公共座位",
-            "occurred_at": (timezone.now() - timedelta(hours=2)).isoformat(),
-            "image_ids": [],
-            "request_id": "",
-        }
-        payload.update(overrides)
-        return payload
-
-    def create_post(self, publisher_id="1001", post_type="lost", status="open", **overrides) -> Post:
-        now = timezone.now()
-        values = {
-            "publisher_id": publisher_id,
-            "publisher_nickname": "小林" if publisher_id == "1001" else "小周",
-            "publisher_is_campus_verified": publisher_id == "1001",
-            "publisher_verification_mode": "demo",
-            "post_type": post_type,
-            "title": "丢失的黑色钱包" if post_type == "lost" else "拾到一串钥匙",
-            "description": "在图书馆二楼附近丢失，黑色皮质，内有校园卡与少量现金。",
-            "category_id": "cat_other",
-            "location_id": "loc_library",
-            "campus_id": "campus_main",
-            "location_detail": "二楼公共座位",
-            "occurred_at": now - timedelta(hours=2),
-            "handover_note": None
-            if post_type == "lost"
-            else "暂由本人保管，核实特征后在校内约定地点交接。",
-            "status": status,
-        }
-        created_at = overrides.pop("created_at", None)
-        values.update(overrides)
-        post = Post.objects.create(**values)
-        if created_at is not None:
-            # auto_now_add 会覆盖传入值，需要建完再改
-            Post.objects.filter(pk=post.pk).update(created_at=created_at)
-            post.refresh_from_db()
-        return post
-
-    def create_image(self, owner_id="1001", post=None, alt_text="白色按键的蓝牙耳机", is_public=True):
-        image = PostImage(owner_id=owner_id, post=post, alt_text=alt_text, is_public=is_public)
-        image.sort_order = 0 if post is None else (post.images.count())
-        image.save_bytes(PNG_BYTES, "image/png")
-        image.save()
-        return image
+def post_payload(post_id: str, **overrides) -> dict:
+    """Defaults for a database post created directly by a test."""
+    now = timezone.now()
+    values = {
+        "post_type": "found",
+        "title": "图书馆拾到蓝色水杯",
+        "description": "",
+        "category_id": "daily",
+        "location_id": "library",
+        "status": "open",
+        "occurred_at": now - timedelta(hours=2),
+        "publisher_id": "finder",
+        "created_at": now,
+        "updated_at": now,
+    }
+    values.update(overrides)
+    return {"id": post_id, **values}

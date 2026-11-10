@@ -1,14 +1,28 @@
-"""统一成功响应包装：{code, message, data}。
+"""Success envelope from contract §2.3 (``code`` / ``message`` / ``data``)."""
 
-契约见《共同字段与接口约定-03》2.3。所有 JSON 接口（图片二进制接口除外）
-都必须经过 ok() 或异常处理器，保证前端只解析一种结构。
-"""
+from __future__ import annotations
+
+from typing import Any
+
+from rest_framework import status as http_status
 from rest_framework.response import Response
 
 
-def ok(data=None, message: str = "操作成功", status: int = 200, headers=None) -> Response:
-    return Response(
-        {"code": "OK", "message": message, "data": data},
-        status=status,
-        headers=headers,
-    )
+def ok(
+    data: Any = None,
+    *,
+    message: str = "操作成功",
+    status: int = http_status.HTTP_200_OK,
+) -> Response:
+    return Response({"code": "OK", "message": message, "data": data}, status=status)
+
+
+def page_payload(items: list[dict], total: int, page: int, page_size: int) -> dict:
+    """Pagination envelope body from contract §2.5 (``total=0`` implies ``total_pages=0``)."""
+    return {
+        "items": items,
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "total_pages": (total + page_size - 1) // page_size if total else 0,
+    }

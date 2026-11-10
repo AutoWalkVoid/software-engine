@@ -1,0 +1,29 @@
+# 运行时产物：SQLite 数据库、私有图片、临时目录
+tmp/
+var/
+*.sqlite3
+*.db
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 前端
+node_modules/
+dist/
+build/
+
+# 编辑器与系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 本地配置
+.env
+.env.local

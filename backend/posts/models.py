@@ -1,8 +1,7 @@
-"""信息与图片模型（契约 3.5 / 3.6）。
+"""B dictionaries, lost/found posts and privately stored images."""
 
-Post 是 B 子系统的核心表；A 的「我的发布」直接查询本表（按 publisher_id 过滤）。
-PostImage 的二进制不进静态目录，只经 /api/v1/post-images/{id}/content 读取。
-"""
+from __future__ import annotations
+
 import os
 import uuid
 
@@ -10,13 +9,20 @@ from django.conf import settings
 from django.core.files.base import ContentFile
 from django.core.files.storage import FileSystemStorage
 from django.db import models
+from django.db.models.functions import Length
+from django.utils import timezone
+
+# Django 只给 CharField 注册了 length 查找，TextField 要用得自己注册一次。
+# 注册后 description__length 才能用在 CheckConstraint 里（契约 3.5 的 10～2000 字）。
+models.TextField.register_lookup(Length)
+
+
+def new_post_id() -> str:
+    return str(uuid.uuid4())
 
 
 class PrivateImageStorage(FileSystemStorage):
-    """私有图片存储：目录不在 STATIC_URL 下，只能通过视图鉴权后读取。
-
-    位置在访问时从 settings 读取，便于测试用 override_settings 指向临时目录。
-    """
+    """Image contents are served only by B's permission-checked endpoint."""
 
     @property
     def base_location(self):
@@ -24,84 +30,131 @@ class PrivateImageStorage(FileSystemStorage):
 
     @property
     def location(self):
-        return os.path.abspath(str(settings.PRIVATE_MEDIA_ROOT))
+        return os.path.abspath(str(self.base_location))
 
 
 private_image_storage = PrivateImageStorage()
 
 
+class Campus(models.Model):
+    id = models.CharField(primary_key=True, max_length=64)
+    name = models.CharField(max_length=60)
+
+    class Meta:
+        verbose_name = "校区"
+        verbose_name_plural = "校区"
+        ordering = ["id"]
+
+    def __str__(self) -> str:  # pragma: no cover
+        return self.name
+
+
+class Category(models.Model):
+    id = models.CharField(primary_key=True, max_length=64)
+    name = models.CharField(max_length=60)
+    sort_order = models.IntegerField(default=0)
+
+    class Meta:
+        verbose_name = "物品类别"
+        verbose_name_plural = "物品类别"
+        ordering = ["sort_order", "id"]
+
+    def __str__(self) -> str:  # pragma: no cover
+        return self.name
+
+
+class Location(models.Model):
+    id = models.CharField(primary_key=True, max_length=64)
+    campus = models.ForeignKey(Campus, on_delete=models.PROTECT, related_name="locations")
+    name = models.CharField(max_length=60)
+    sort_order = models.IntegerField(default=0)
+
+    class Meta:
+        verbose_name = "位置"
+        verbose_name_plural = "位置"
+        ordering = ["sort_order", "id"]
+
+    def __str__(self) -> str:  # pragma: no cover
+        return self.name
+
+
 class Post(models.Model):
+    """A lost (``lost``) or found (``found``) post; both share one table (contract §3.5)."""
+
     POST_TYPE_LOST = "lost"
     POST_TYPE_FOUND = "found"
-    POST_TYPE_CHOICES = [(POST_TYPE_LOST, "失物"), (POST_TYPE_FOUND, "招领")]
-
     STATUS_OPEN = "open"
     STATUS_IN_HANDOVER = "in_handover"
     STATUS_COMPLETED = "completed"
     STATUS_WITHDRAWN = "withdrawn"
-    STATUS_CHOICES = [
-        (STATUS_OPEN, "进行中"),
-        (STATUS_IN_HANDOVER, "交接中"),
-        (STATUS_COMPLETED, "已完成"),
-        (STATUS_WITHDRAWN, "已撤回"),
+    POST_TYPES = [(POST_TYPE_LOST, "失物"), (POST_TYPE_FOUND, "招领")]
+    STATUSES = [
+        ("open", "进行中"),
+        ("in_handover", "交接中"),
+        ("completed", "已完成"),
+        ("withdrawn", "已撤回"),
     ]
-    #: 公开列表默认展示的状态集合（契约 3.5 / 5.3）
-    PUBLIC_STATUSES = (STATUS_OPEN, STATUS_IN_HANDOVER)
+    #: 公开列表默认展示的状态（契约 3.5：open 与 in_handover；completed 需显式筛选）
+    #: 权威定义在 posts.constants.PUBLIC_STATUSES，这里同步一份供模型层引用。
+    PUBLIC_STATUSES = ("open", "in_handover")
 
-    publisher_id = models.CharField(max_length=64, db_index=True)
-    # 发布者在发布时从 A 的身份响应里取得的 UserSummary 快照；
-    # A 提供实时批量摘要接口后由 integration.users 覆盖，见 README。
-    publisher_nickname = models.CharField(max_length=30, blank=True, default="")
-    publisher_is_campus_verified = models.BooleanField(default=False)
-    publisher_verification_mode = models.CharField(max_length=10, blank=True, default="")
-
-    post_type = models.CharField(max_length=10, choices=POST_TYPE_CHOICES)
+    id = models.CharField(primary_key=True, max_length=64, default=new_post_id)
+    post_type = models.CharField(max_length=8, choices=POST_TYPES)
     title = models.CharField(max_length=60)
-    description = models.CharField(max_length=2000)
-    category = models.ForeignKey("catalog.Category", on_delete=models.PROTECT, related_name="posts")
-    location = models.ForeignKey("catalog.Location", on_delete=models.PROTECT, related_name="posts")
-    # campus 由 location 推导，不接受客户端提交
-    campus = models.ForeignKey("catalog.Campus", on_delete=models.PROTECT, related_name="posts")
+    description = models.TextField()
+    category = models.ForeignKey(Category, on_delete=models.PROTECT, related_name="posts")
+    location = models.ForeignKey(Location, on_delete=models.PROTECT, related_name="posts")
     location_detail = models.CharField(max_length=100, blank=True, default="")
+    handover_note = models.CharField(max_length=200, null=True, blank=True)
+    request_id = models.CharField(max_length=64, null=True, blank=True)
+    status = models.CharField(max_length=16, choices=STATUSES, default="open")
     occurred_at = models.DateTimeField()
-    handover_note = models.CharField(max_length=200, null=True, blank=True, default=None)
-
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_OPEN, db_index=True)
-    # 幂等键：同一发布者 + 同一 request_id 只建一条；空串表示未提供
-    request_id = models.CharField(max_length=64, blank=True, default="")
-
+    publisher_id = models.CharField(max_length=64, db_column="publisher_id", db_index=True)
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(default=timezone.now)
     completed_at = models.DateTimeField(null=True, blank=True)
-    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
-    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        db_table = "posts_post"
+        verbose_name = "失物/招领信息"
+        verbose_name_plural = "失物/招领信息"
         ordering = ["-created_at", "-id"]
-        constraints = [
-            models.UniqueConstraint(
-                fields=["publisher_id", "request_id"],
-                condition=~models.Q(request_id=""),
-                name="uniq_post_publisher_request",
-            )
-        ]
         indexes = [
-            models.Index(fields=["status", "-created_at"], name="idx_post_status_created"),
-            models.Index(fields=["category", "location"], name="idx_post_cat_loc"),
+            models.Index(fields=["status", "post_type"], name="ix_posts_status_type"),
+            models.Index(fields=["category", "status"], name="ix_posts_category_status"),
+            models.Index(fields=["location", "status"], name="ix_posts_location_status"),
+            models.Index(fields=["publisher_id", "-created_at"], name="ix_posts_publisher"),
+        ]
+        constraints = [
+            models.UniqueConstraint(fields=["publisher_id", "request_id"], name="uniq_post_publisher_request"),
+            # 契约 3.5：描述必填 10～2000 字。DRF 已校验，这里再兜一层，
+            # 防止绕过接口直接写库（脚本、admin、其它模块）写入非法值。
+            models.CheckConstraint(
+                condition=models.Q(description__length__gte=10)
+                & models.Q(description__length__lte=2000),
+                name="ck_post_description_length",
+            ),
         ]
 
-    def __str__(self):
-        return f"Post#{self.pk} {self.post_type} {self.title}"
+    def save(self, *args, **kwargs):
+        """任何保存都刷新 ``updated_at``（契约 3.9 要求它反映最近一次修改）。"""
+        self.updated_at = timezone.now()
+        update_fields = kwargs.get("update_fields")
+        if update_fields is not None:
+            kwargs["update_fields"] = set(update_fields) | {"updated_at"}
+        super().save(*args, **kwargs)
 
     @property
-    def is_public(self) -> bool:
-        return self.status != self.STATUS_WITHDRAWN
+    def campus_id(self) -> str:
+        """Campus is derived from the dictionary location (contract §3.4)."""
+        return self.location.campus_id
+
+    def __str__(self) -> str:  # pragma: no cover
+        return f"{self.post_type}:{self.title}"
 
 
 class PostImage(models.Model):
     owner_id = models.CharField(max_length=64, db_index=True)
-    post = models.ForeignKey(
-        Post, null=True, blank=True, on_delete=models.SET_NULL, related_name="images"
-    )
+    post = models.ForeignKey(Post, null=True, blank=True, on_delete=models.SET_NULL, related_name="images")
     file = models.FileField(storage=private_image_storage, upload_to="post-images/", max_length=255)
     mime_type = models.CharField(max_length=32)
     size_bytes = models.PositiveIntegerField()
@@ -111,19 +164,23 @@ class PostImage(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        db_table = "posts_postimage"
         ordering = ["sort_order", "id"]
 
-    def __str__(self):
-        return f"PostImage#{self.pk} owner={self.owner_id}"
-
     def save_bytes(self, data: bytes, mime_type: str) -> None:
-        ext = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}[mime_type]
-        name = f"{uuid.uuid4().hex}.{ext}"
-        self.file.save(name, ContentFile(data), save=False)
+        extension = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}[mime_type]
+        self.file.save(f"{uuid.uuid4().hex}.{extension}", ContentFile(data), save=False)
         self.mime_type = mime_type
         self.size_bytes = len(data)
 
     def delete_file(self) -> None:
-        if self.file:
+        """删除私有存储里的文件；文件字段为空或文件已丢失时不抛异常。
+
+        ``cleanup_images`` 会批量清理未绑定图片，历史数据里可能已经有 file 为空的记录，
+        缺少这层保护会让整条清理命令在中途中断（后续图片都删不掉）。
+        """
+        if not self.file:
+            return
+        try:
             self.file.delete(save=False)
+        except FileNotFoundError:
+            return

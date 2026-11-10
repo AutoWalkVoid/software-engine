@@ -1,6 +1,13 @@
-Django==5.2.19
-djangorestframework==3.18.3
-Pillow==10.4.0
-asgiref==3.13.0
-sqlparse==0.6.1
-tzdata==2026.6
+# B 子系统（信息发布与浏览）独立副本的运行依赖
+
+# 运行时
+Django>=5.2,<5.3
+djangorestframework>=3.16,<4.0
+Pillow>=10.4,<13
+
+# 连接 MySQL 8（验收环境）时需要；默认 SQLite 自测不需要
+PyMySQL[rsa]>=1.1,<2.0
+
+# 测试工具（pytest 用例位于 tests/ 与 posts/tests/）
+pytest>=8.0,<10.0
+pytest-django>=4.8,<5.0

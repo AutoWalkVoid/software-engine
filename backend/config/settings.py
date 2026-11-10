@@ -1,96 +1,166 @@
-"""B 子系统（信息发布与浏览）Django 项目配置。
+"""Django settings for the campus lost-and-found system.
 
-本文件只服务 B 模块 v0 原型：
-- 数据库为 SQLite，表结构即契约 3.4/3.5/3.6 的落库形态；
-- 登录身份不落库（用户表属 A），一律通过 A_IDENTITY_URL 向 A 校验；
-- 图片不进静态目录，统一保存在 PRIVATE_MEDIA_ROOT，经 content 接口读取。
+Configuration comes from ``.env`` (``APP_ENV=dev``) or ``.env.test`` (``APP_ENV=test``) with
+process environment overrides.  Only this module reads the files, and no secret is ever printed.
+
 """
+
+from __future__ import annotations
+
 import os
 from pathlib import Path
+from urllib.parse import parse_qs, unquote, urlsplit
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+PROJECT_DIR = BASE_DIR.parent
+FRONTEND_DIR = PROJECT_DIR / "frontend"
+FRONTEND_BUILD_DIR = FRONTEND_DIR / "dist"
+ENVIRONMENT = (os.getenv("APP_ENV", "dev").strip().lower() or "dev")
+ENV_FILE = PROJECT_DIR / (".env.test" if ENVIRONMENT == "test" else ".env")
 
-SECRET_KEY = os.environ.get("B_SECRET_KEY", "dev-only-secret-key-not-for-production")
-DEBUG = os.environ.get("B_DEBUG", "1") == "1"
-ALLOWED_HOSTS = ["*"]
+
+def _read_env_file(path: Path) -> dict[str, str]:
+    """Minimal KEY=VALUE reader matching the format written by scripts/local_mysql.ps1."""
+    values: dict[str, str] = {}
+    if not path.is_file():
+        return values
+    for raw in path.read_text(encoding="utf-8-sig").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip().strip('"').strip("'")
+    return values
+
+
+_ENV_VALUES = _read_env_file(ENV_FILE)
+
+
+def env(key: str, default: str | None = None) -> str | None:
+    """Environment variable first, then the selected env file, then ``default``."""
+    if key in os.environ:
+        return os.environ[key]
+    return _ENV_VALUES.get(key, default)
+
+
+def env_flag(key: str, default: bool = False) -> bool:
+    value = env(key)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def env_list(key: str) -> list[str]:
+    value = env(key) or ""
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+# --- Core ---------------------------------------------------------------------------------
+
+# 本仓库是 B 子系统的独立可运行副本：没有 .env 时用开发默认值直接跑起来，
+# 正式部署请通过环境变量或 .env 覆盖这两项。
+SECRET_KEY = env("AUTH_SECRET") or "dev-only-auth-secret-please-change-0123456789"
+
+DEBUG = env_flag("DJANGO_DEBUG", True)
+ALLOWED_HOSTS = ["127.0.0.1", "localhost", "[::1]", "testserver", *env_list("DJANGO_ALLOWED_HOSTS")]
 
 INSTALLED_APPS = [
     "django.contrib.contenttypes",
     "django.contrib.auth",
-    "rest_framework",
-    "catalog",
+    "users",
+    "identity",
     "posts",
+    # "claims",  # C 的认领模块不在本仓库内，改用 integration/claims.py 的桩
     "workflow",
 ]
+AUTH_USER_MODEL = "users.User"
 
 MIDDLEWARE = [
-    "django.middleware.security.SecurityMiddleware",
     "django.middleware.common.CommonMiddleware",
+    "common.middleware.SimpleCorsMiddleware",
 ]
 
 ROOT_URLCONF = "config.urls"
 WSGI_APPLICATION = "config.wsgi.application"
+ASGI_APPLICATION = "config.asgi.application"
 
-TEMPLATES = [
-    {
-        "BACKEND": "django.template.backends.django.DjangoTemplates",
-        "DIRS": [],
-        "APP_DIRS": False,
-        "OPTIONS": {"context_processors": []},
-    }
-]
+TEMPLATES: list[dict] = []  # The demo UI is a static bundle; no Django templates are rendered.
 
-DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.sqlite3",
-        "NAME": BASE_DIR / "var" / "db.sqlite3",
-    }
-}
-
-DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+APPEND_SLASH = False
+DEFAULT_CHARSET = "utf-8"
 
 LANGUAGE_CODE = "zh-hans"
 TIME_ZONE = "UTC"
-USE_I18N = False
+USE_I18N = True
 USE_TZ = True
 
-STATIC_URL = None
+DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
-# 图片私有存储目录：不挂在静态 URL 下，只能经 /api/v1/post-images/{id}/content 读取
-PRIVATE_MEDIA_ROOT = BASE_DIR / "var" / "media"
-FILE_UPLOAD_MAX_MEMORY_SIZE = 5 * 1024 * 1024 + 1024
-DATA_UPLOAD_MAX_MEMORY_SIZE = 6 * 1024 * 1024
+# --- Database -----------------------------------------------------------------------------
 
-# 契约要求路径不带结尾斜杠
-APPEND_SLASH = False
+# 默认落 SQLite，clone 下来直接 migrate 就能跑；验收环境请设 MySQL 8 的 DATABASE_URL。
+DATABASE_URL = env("DATABASE_URL") or f"sqlite:///{BASE_DIR / 'var' / 'db.sqlite3'}"
 
-# ------- 跨子系统集成（A 用户、C 认领）-------
-# A 的身份校验接口，建议指向 A 的 GET /api/v1/users/me；未配置时所有登录请求一律 401。
-A_IDENTITY_URL = os.environ.get("A_IDENTITY_URL", "")
-A_IDENTITY_TIMEOUT = float(os.environ.get("A_IDENTITY_TIMEOUT", "3"))
-# C 的认领服务基地址；未配置时撤回不调用 C（仅本地开发，见 README「与契约的差异」）
-C_BASE_URL = os.environ.get("C_BASE_URL", "").rstrip("/")
-C_TIMEOUT = float(os.environ.get("C_TIMEOUT", "3"))
+
+def _database_from_url(url: str) -> dict:
+    parts = urlsplit(url)
+    backend = parts.scheme.split("+", 1)[0].lower()
+    if backend == "sqlite":
+        return {
+            "ENGINE": "django.db.backends.sqlite3",
+            "NAME": parts.path.lstrip("/") or str(PROJECT_DIR / "db.sqlite3"),
+        }
+    if backend != "mysql":
+        raise RuntimeError(f"不支持的数据库后端：{parts.scheme}")
+    # Django's MySQL backend expects a DB-API named MySQLdb; PyMySQL provides it.
+    import pymysql
+
+    pymysql.install_as_MySQLdb()
+    query = parse_qs(parts.query)
+    return {
+        "ENGINE": "django.db.backends.mysql",
+        "NAME": parts.path.lstrip("/"),
+        "USER": unquote(parts.username or ""),
+        "PASSWORD": unquote(parts.password or ""),
+        "HOST": parts.hostname or "127.0.0.1",
+        "PORT": str(parts.port or 3306),
+        "CONN_MAX_AGE": 60,
+        "OPTIONS": {
+            "charset": query.get("charset", ["utf8mb4"])[0],
+            "init_command": "SET sql_mode='STRICT_TRANS_TABLES'",
+        },
+    }
+
+
+DATABASES = {"default": _database_from_url(DATABASE_URL)}
+
+# --- Application behaviour ----------------------------------------------------------------
+
+DEMO_MODE = env_flag("DEMO_MODE", False)
+DEMO_TOKEN_TTL_HOURS = int(env("DEMO_TOKEN_TTL_HOURS", "24") or 24)
+RATE_LIMIT_ENABLED = env_flag("RATE_LIMIT_ENABLED", True)
+LOGIN_RATE_LIMIT = 10
+BINDING_RATE_LIMIT = 5
+RATE_LIMIT_WINDOW_SECONDS = 60
+PRIVATE_MEDIA_ROOT = PROJECT_DIR / "tmp" / "private-media"
 
 REST_FRAMEWORK = {
-    "DEFAULT_AUTHENTICATION_CLASSES": ["integration.auth.BearerAuthentication"],
-    "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.AllowAny"],
-    "EXCEPTION_HANDLER": "common.exceptions.api_exception_handler",
-    "DEFAULT_RENDERER_CLASSES": ["rest_framework.renderers.JSONRenderer"],
+    "DEFAULT_AUTHENTICATION_CLASSES": ["common.authentication.BearerAuthentication"],
+    "DEFAULT_PERMISSION_CLASSES": [],
+    "UNAUTHENTICATED_USER": None,
     "DEFAULT_PARSER_CLASSES": ["rest_framework.parsers.JSONParser"],
-    "UNAUTHENTICATED_USER": "django.contrib.auth.models.AnonymousUser",
-    "DEFAULT_PAGINATION_CLASS": None,
-    "DATETIME_FORMAT": "iso-8601",
+    "DEFAULT_RENDERER_CLASSES": ["rest_framework.renderers.JSONRenderer"],
+    "EXCEPTION_HANDLER": "common.errors.contract_exception_handler",
+    "TEST_REQUEST_DEFAULT_FORMAT": "json",
 }
 
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,
-    "formatters": {
-        "simple": {"format": "%(asctime)s %(levelname)s %(name)s: %(message)s"},
+    "formatters": {"plain": {"format": "%(asctime)s %(levelname)s %(name)s %(message)s"}},
+    "handlers": {"console": {"class": "logging.StreamHandler", "formatter": "plain"}},
+    "loggers": {
+        "claims": {"handlers": ["console"], "level": "INFO", "propagate": False},
+        "django.request": {"handlers": ["console"], "level": "WARNING", "propagate": False},
     },
-    "handlers": {
-        "console": {"class": "logging.StreamHandler", "formatter": "simple"},
-    },
-    "root": {"handlers": ["console"], "level": os.environ.get("B_LOG_LEVEL", "INFO")},
 }
